@@ -187,8 +187,8 @@ class Config:
         return self.__get_log_level_for_logger('gmail_level', self.default_log_level)
 
     @property
-    def lotr_webstore_log_level(self):
-        return self.__get_log_level_for_logger('lotr_webstore_level', self.default_log_level)
+    def webstore_log_level(self):
+        return self.__get_log_level_for_logger('webstore_level', self.default_log_level)
 
     def valiate(self):
         if self.is_self_scheduling and self.allow_scheduling:

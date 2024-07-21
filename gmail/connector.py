@@ -8,12 +8,13 @@ Example:
     connector = GmailConnector(email='user@example.com', token_path='token.json')
     verification_code = connector.find_email_by_subject()  # Find a verification code email
 
->"""
+"""
 
 import os
 from logging import getLogger
 from typing import Optional, Union
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -33,6 +34,8 @@ class GmailConnector:
 
     def __init__(self, email: str, config: Optional[Union[str, Config]] = None):
         self.config: Config = Config.load_config(config) or Config.get_global_config()
+        if config.gmail_credentials_location is None:
+            raise ValueError("Gmail credentials location is not set")
         self.email: str = email
         self.token_path: str = os.path.join(
             self.config.gmail_token_location, f"{slugify(email)}_token.json"
@@ -47,11 +50,11 @@ class GmailConnector:
             self.creds = Credentials.from_authorized_user_file(
                 self.token_path, self.SCOPES
             )
-            self.logger.info(
+            self.logger.debug(
                 "Successfully loaded credentials from file '%s'", self.token_path
             )
         except (FileNotFoundError, ValueError):
-            self.logger.info(
+            self.logger.critical(
                 "Could not load credentials from file '%s'", self.token_path
             )
 
@@ -100,7 +103,7 @@ class GmailConnector:
             return False
         try:
             self.creds.refresh(Request())
-        except HttpError:
+        except (HttpError, RefreshError):
             self.get_new_credentials()
         return True
 
@@ -118,7 +121,7 @@ class GmailConnector:
         refreshed = self.ensure_credentials()
         if self.service and not refreshed:
             return
-        self.service = build("gmail", "v1", credentials=self.creds)
+        self.service = build("gmail", "v1", credentials=self.creds, cache_discovery=False)
 
     def get_messages(self):
         """

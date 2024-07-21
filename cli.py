@@ -6,7 +6,7 @@ from argparse import ArgumentParser
 from zc.lockfile import LockError, LockFile
 
 from core.config import Config
-from webstore.lotr.connector import LotRWebstoreConnector
+from webstore.swgoh.connector import SwgohWebstoreConnector
 
 
 def get_parser():
@@ -27,9 +27,13 @@ def main():
     Config.load_global_config(args.config)
     config = Config.get_global_config()
     logging.basicConfig(
-        filename='lotr_webstore.log',
+        # filename='swgoh_webstore.log',
         level=config.default_log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('swgoh_webstore.log'),
+            logging.StreamHandler(sys.stdout)
+        ]
     )
     logger = logging.getLogger('__main__')
     # TODO: Add lock options to config
@@ -39,12 +43,12 @@ def main():
     #     * validate lockname
     #     * enfore lock if schedule is allowed
     try:
-        lock = LockFile(f'webstore_{args.email}.lock')
+        lock = LockFile(f'swgoh_webstore_{args.email}.lock')
     except LockError:
         logger.warning('Prevent the script from running multiple times. Exit')
         sys.exit(1)
 
-    connector = LotRWebstoreConnector(
+    connector = SwgohWebstoreConnector(
         email=args.email,
         config=config
     )

@@ -159,7 +159,7 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-default_config.ini
+*.ini
 # prevent accidantly commiting the credentials.json, token.json
 # or example / test responses which may include personal data
 *.json
@@ -167,3 +167,4 @@ default_config.ini
 *.pickle
 *.lock
 venv
+data

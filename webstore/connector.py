@@ -13,8 +13,9 @@ import re
 from datetime import datetime, timedelta
 from sched import scheduler
 from time import sleep, time
-from typing import Optional, Union
+from typing import Optional, Union, Type
 from uuid import uuid4
+from urllib import parse as urlparse
 
 from requests import ConnectionError as RequestConnectionError
 from requests import Session
@@ -23,12 +24,11 @@ from requests import Timeout as RequestTimeout
 from core.config import Config
 from core.utils import slugify
 from gmail.connector import GmailConnector
-from webstore.lotr.types import StoreData
 
 # TODO: Move scheduler logic to own class
 # TODO: Update and add docstrings
 
-class LotRWebstoreConnector:
+class EAWebstoreConnector:
     """
     A class for connecting to and interacting with the
     Lord of the Rings - Heroes of Middleearth web store.
@@ -40,24 +40,32 @@ class LotRWebstoreConnector:
     verifying codes, retrieving offers, and purchasing items from the web store.
     """
 
-    BASE_URL = "https://store.lotr-home.ea.com"
+    BASE_URL = None
+    EA_ACCOUNTS_AUTH_URL = "https://accounts.ea.com/connect/auth?mode=junoNff&client_id=SWGOH_SERVER_WEB_APP&response_type=code&hide_create=true&redirect_uri=https://store.galaxy-of-heroes.starwars.ea.com"
+    
     EA_SUBJECT_PATTERN = re.compile("^Verification Code For EA[^0-9]*([0-9]+)$")
-    logger = logging.getLogger("LotRWebstoreConnector")
+    SESSION_FILENAME_PREFIX = ''
+    session_class: Type['Session'] = Session
+    logger = logging.getLogger("EAWebstoreConnector")
 
     def __init__(self, email: str, config: Optional[Union[str, Config]] = None):
         self.config: Config = Config.load_config(config) or Config.get_global_config()
         self.email: str = email
-        self.gmail_connector: GmailConnector = GmailConnector(
-            email=email, config=self.config
-        )
+        try:
+            self.gmail_connector: GmailConnector = GmailConnector(
+                email=email, config=self.config
+            )
+        except ValueError as e:
+            self.logger.error(e)
+            self.gmail_connector = None
         self.session_filename: str = os.path.join(
             self.config.webstore_sessions_location,
-            f"lotr_{slugify(email)}_session.pickle",
+            f"{self.SESSION_FILENAME_PREFIX}{slugify(email)}_session.pickle",
         )
-        self.session: Session = Session()
+        self.session = self.session_class()
         self.scheduler = scheduler(time, sleep)
-        self.default_headers = {"Accept-Language": "DE"}
-        self.logger.setLevel(self.config.lotr_webstore_log_level)
+        self.logger.setLevel(self.config.webstore_log_level)
+        self.auth_id = None
 
         # Attempt to load the session from a file
         if os.path.exists(self.session_filename):
@@ -66,13 +74,23 @@ class LotRWebstoreConnector:
         self.schedule_ping()
         self.schedule_connection_check()
 
+    def get_default_headers(self):
+        if self.auth_id:
+            return {
+                'X-Rpc-Auth-Id': self.auth_id,
+                "Accept-Language": "DE"
+            }
+        return {
+            "Accept-Language": "DE"
+        }
+
     def load_session(self):
         """
         Load and deserialize a session object from a file.
         """
         with open(self.session_filename, "rb") as file:
             self.session = pickle.load(file)
-        self.logger.info(
+        self.logger.debug(
             "Successfully loaded session from file '%s'", self.session_filename
         )
 
@@ -82,77 +100,12 @@ class LotRWebstoreConnector:
         """
         with open(self.session_filename, "wb") as file:
             pickle.dump(self.session, file)
-        self.logger.info(
+        self.logger.debug(
             "Successfully saved session to file '%s'", self.session_filename
         )
 
-    def request_otc(self):
-        """
-        Request a one-time code (OTC) for authentication.
-
-        Raises:
-            NotImplementedError: If the request returns an unhandled status code.
-
-        This method sends a request to obtain a one-time code for authentication.
-        """
-        response = self.session.post(
-            url=f"{self.BASE_URL}/auth/request_otc",
-            headers=self.default_headers,
-            json={"email": self.email},
-        )
-        self.logger.debug(
-            "[request_otc - %s] Request Body: %s",
-            self.email,
-            str(response.request.body),
-        )
-        self.logger.debug(
-            "[request_otc - %s] Response Status Code: %i",
-            self.email,
-            response.status_code,
-        )
-        self.logger.debug(
-            "[request_otc - %s] Response Body: %s", self.email, response.text
-        )
-        if response.status_code != 200:
-            raise NotImplementedError(f'Unhandled Status Code "{response.status_code}"')
-
-    def verify_otc(self, code: str):
-        """
-        Verify the one-time code (OTC) for authentication.
-
-        Args:
-            code (str): The one-time code to verify.
-
-        Raises:
-            NotImplementedError: If the request returns an unhandled status code.
-
-        This method sends a request to verify the provided one-time code for authentication.
-        If the verification is successful, the session is updated, and the session state is saved to a file.
-        """
-        response = self.session.post(
-            url=f"{self.BASE_URL}/auth/code_check",
-            headers=self.default_headers,
-            json={
-                "email": self.email,
-                "code": code,
-                "rememberMe": True,
-                "countryCode": "",
-            },
-        )
-        self.logger.debug(
-            "[verify_otc - %s] Request Body: %s", self.email, str(response.request.body)
-        )
-        self.logger.debug(
-            "[verify_otc - %s] Response Status Code: %i",
-            self.email,
-            response.status_code,
-        )
-        self.logger.debug(
-            "[verify_otc - %s] Response Body: %s", self.email, response.text
-        )
-        if response.status_code != 200:
-            raise NotImplementedError(f'Unhandled Status Code "{response.status_code}"')
-        self.save_session()
+    def _wrap_offers(self, data):
+        raise NotImplementedError
 
     def get_offers(self):
         """
@@ -169,21 +122,18 @@ class LotRWebstoreConnector:
         self.logger.info("Get offers for account %s", self.email)
         response = self.session.get(
             url=f"{self.BASE_URL}/store/offers?countryCode=",
-            headers=self.default_headers,
+            headers=self.get_default_headers(),
         )
         self.logger.debug(
             "[get_offers - %s] Response Status Code: %i",
             self.email,
             response.status_code,
         )
-        self.logger.debug(
-            "[get_offers - %s] Response Body: %s", self.email, response.text
-        )
         if response.status_code == 200:
-            return StoreData(data=response.json())
+            return self._wrap_offers(response.json())
         elif response.status_code == 401:
             return None
-        raise NotImplementedError(f'Unhandled Status Code "{response.status_code}"')
+        raise NotImplementedError(f'Unhandled Status Code "{response.status_code}": {response.text}')
 
     def purchase_offer(self, item_id: str, currency_type: str):
         """
@@ -204,7 +154,7 @@ class LotRWebstoreConnector:
         self.logger.info("Purchase item '%s' for account '%s'", item_id, self.email)
         response = self.session.post(
             url=f"{self.BASE_URL}/store/purchase",
-            headers=self.default_headers,
+            headers=self.get_default_headers(),
             json={
                 "countryCode": "DE",
                 "currencyCode": "EUR",
@@ -235,6 +185,8 @@ class LotRWebstoreConnector:
         raise NotImplementedError(f'Unhandled Status Code "{response.status_code}"')
 
     def get_code_from_message(self, message_id):
+        if not self.gmail_connector:
+            return None
         message = self.gmail_connector.get_message_details(message_id)
         if not message.receiver or not message.subject:
             return None
@@ -245,14 +197,128 @@ class LotRWebstoreConnector:
             return None
         return _match[1]
 
-    def login(self):
+    def login(self, force_login: bool = False) -> None:
+        """
+        Logs into the webstore.
+
+        Args:
+            force_login (bool, optional): If True, forces the login even if already logged in. Defaults to False.
+
+        Raises:
+            Exception: If failed to get the accounts URL.
+
+        Returns:
+            None
+        """
+        if not force_login and self.auth_id:
+            return
         self.logger.info("Perform login for account %s", self.email)
-        pre_messages_list = self.gmail_connector.get_messages()
+        self.logger.debug("Send auth0 request...")
+        response = self.session.get(self.EA_ACCOUNTS_AUTH_URL)
+        if response.status_code != 200:
+            raise Exception("Failed to get accounts URL")
+        
+        # Check if it's already the code, we can skip the login process
+        _parsed = urlparse.urlparse(response.url)
+        save = False
+        if "code" in urlparse.parse_qs(_parsed.query):
+            self.logger.debug("Code found in URL, skipping login process...")
+            code = urlparse.parse_qs(_parsed.query)["code"][0]
+        else:
+            self.logger.debug("Perform login process...")
+            code = self._perform_login(response.url)
+            save = True
+        
+        self._finish_login(code)
+        if save:
+            self.save_session()
+
+    def _perform_login(self, url: str) -> str:
+        """
+        Performs the login process for the webstore.
+
+        Args:
+            url (str): The URL of the signin page.
+
+        Returns:
+            str: The code obtained from the redirect location.
+
+        Raises:
+            Exception: If any step of the login process fails.
+        """
+        response = self.session.get(url)
+        if response.status_code != 200:
+            # TODO: improve error handling
+            raise Exception("Failed to get signin page")
+        self.logger.debug("Submit email...")
+        pre_message_list = self._get_messages()
+        response = self.session.post(url, data={
+            "email": self.email,
+            "_eventId": "submit",
+            "thirdPartyCaptchaResponse": "",
+            "_rememberMe": "on",
+            "rememberMe": "on"
+        })
+        if response.status_code != 200:
+            # TODO: improve error handling
+            raise Exception("Failed to submit email")
+        code = self._get_code_from_gmail_account(pre_message_list)
+        if not code:
+            print("Failed to get code from Gmail account.")
+            code = input("Enter the code: ")
+        response = self.session.post(response.url, data={
+            "oneTimeCode": code,
+            "_eventId": "submit",
+        })
+        if response.status_code != 200:
+            # TODO: improve error handling
+            raise Exception("Failed to submit code")
+
+        _parsed = urlparse.urlparse(response.url)
+        if "code" not in urlparse.parse_qs(_parsed.query):
+            # TODO: improve error handling
+            raise Exception("Failed to get code in redirect location")
+        
+        return urlparse.parse_qs(_parsed.query)["code"][0]
+
+    def _finish_login(self, code):
+        """
+        Completes the login process by sending the access code to the server and retrieving the authentication ID.
+
+        Args:
+            code (str): The access code obtained during the login process.
+
+        Returns:
+            None
+
+        Raises:
+            KeyError: If the authentication ID cannot be retrieved from the server response.
+
+        """
+        finish = self.session.post("https://store.galaxy-of-heroes.starwars.ea.com/auth/access_code", json={
+            "access_code": code,
+            "redirect_uri": "https://store.galaxy-of-heroes.starwars.ea.com"
+        })
+        self.auth_id = finish.json()["authId"]
+
+    def _get_messages(self):
+        if not self.gmail_connector:
+            return None
+        self.logger.debug("Get messages...")
+        return self.gmail_connector.get_messages()
+
+    def _get_code_from_gmail_account(self, pre_messages_list: Optional[list]):
+        if not self.gmail_connector or pre_messages_list is None:
+            return None
         code = None
-        self.request_otc()
+        self.logger.debug("Get messages...")
         for _ in range(0, self.config.max_login_attempts):
             sleep(self.config.login_sleep_time)
-            new_messages_list = self.gmail_connector.get_messages()
+            new_messages_list = self._get_messages()
+            if not new_messages_list:
+                self.logger.debug("No messages found, retrying...")
+                continue
+            # TODO: In case the prev. Code wasn't used the same code is send which results in the check evaluating to False. This should be fixed.
             has_new_messages = (
                 new_messages_list.messages[0].id != pre_messages_list.messages[0].id
             )
@@ -267,10 +333,7 @@ class LotRWebstoreConnector:
             pre_messages_list = new_messages_list
             if code:
                 break
-
-        if not code:
-            raise ValueError("The verification code wasn't found in the inbox!")
-        self.verify_otc(code)
+        return code
 
     def schedule_connection_check(self):
         if not self.config.is_self_scheduling:
@@ -304,12 +367,22 @@ class LotRWebstoreConnector:
 
     def schedule_purchase(self, delay, item_id: str, currency_type: str):
         if not self.config.is_self_scheduling and not self.config.allow_scheduling:
+            self.logger.info(
+                "Scheduling is deactivated! Item \"%s\" will be available in %s",
+                item_id,
+                str(timedelta(seconds=delay)),
+            )
             return
         elif (
             self.config.allow_scheduling
             and self.config.max_delay_scheduling_time > 0
             and self.config.max_delay_scheduling_time < delay
         ):
+            self.logger.info(
+                "The delay exceeds the max allowed delay! Item \"%s\" will be available in %s",
+                item_id,
+                str(timedelta(seconds=delay)),
+            )
             return
         for queue_entry in self.scheduler.queue:
             if queue_entry.action != self.purchase_offer:
@@ -336,7 +409,7 @@ class LotRWebstoreConnector:
         _now = datetime.now()
         return timedelta(seconds=self.scheduler.queue[0].time - _now.timestamp())
 
-    def schedule_run(self, run_directly: bool):
+    def schedule_run(self, run_directly: bool = False):
         if not self.config.is_self_scheduling and not self.config.allow_scheduling:
             return
         elif run_directly:
@@ -355,7 +428,8 @@ class LotRWebstoreConnector:
                 str(self.get_delta()),
             )
             return
-
+        elif self.config.allow_scheduling:
+            return
         self.logger.info("No purchase found to schedule run...")
         self.scheduler.enter(3600, 1, self.run)
         self.logger.info(
@@ -382,47 +456,15 @@ class LotRWebstoreConnector:
             free_offers.append(ws_offer)
         return free_offers
 
+    def _handle_offers(self, offers) -> bool:
+        raise NotImplementedError
+
     def run(self):
+        self.login()
         self.logger.info("Getting offers...")
         offers = self.get_offers()
-        purchases = 0
-        if not offers:
-            self.login()
-            offers = self.get_offers()
-        for ws_offer in offers.web_store_offers:
-            offer = ws_offer.offer
-            if not offer.is_free_offer:
-                continue
-            self.logger.info("FreeOffer found: %s", ws_offer.item.title)
-            if offer.price.purchase_amount > 0:
-                self.logger.warning(
-                    "Free Offer without Free price found! Please investigate..."
-                )
-                continue
-            elif offer.purchase_cooldown_left:
-                self.schedule_purchase(
-                    delay=offer.purchase_cooldown_left,
-                    item_id=offer.id,
-                    currency_type=offer.price.purchase_currency,
-                )
-                continue
-            purchases += 1
-            response = self.purchase_offer(
-                item_id=offer.id, currency_type=offer.price.purchase_currency
-            )
-            for granted_item in response["itemsGranted"]:
-                name = granted_item.get("name", "NameNotPresent")
-                min_quantity = (granted_item.get("quantity") or {}).get(
-                    "min", "UnkownMinCount"
-                )
-                max_quantity = (granted_item.get("quantity") or {}).get(
-                    "max", "UnkownMinCount"
-                )
-
-                info_message = f" ItemGranted: {name} ({min_quantity}/{max_quantity})"
-                self.logger.info(info_message)
-
-        self.schedule_run(purchases > 0)
+        run_directly = self._handle_offers(offers)
+        self.schedule_run(run_directly)
 
     def start(self):
         self.run()
