@@ -220,18 +220,15 @@ class EAWebstoreConnector:
         
         # Check if it's already the code, we can skip the login process
         _parsed = urlparse.urlparse(response.url)
-        save = False
         if "code" in urlparse.parse_qs(_parsed.query):
             self.logger.debug("Code found in URL, skipping login process...")
             code = urlparse.parse_qs(_parsed.query)["code"][0]
         else:
             self.logger.debug("Perform login process...")
             code = self._perform_login(response.url)
-            save = True
         
         self._finish_login(code)
-        if save:
-            self.save_session()
+        self.save_session()
 
     def _perform_login(self, url: str) -> str:
         """

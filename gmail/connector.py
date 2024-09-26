@@ -36,6 +36,8 @@ class GmailConnector:
         self.config: Config = Config.load_config(config) or Config.get_global_config()
         if config.gmail_credentials_location is None:
             raise ValueError("Gmail credentials location is not set")
+        elif not os.path.exists(config.gmail_credentials_location):
+            raise ValueError("Gmail credentials location does not exist")
         self.email: str = email
         self.token_path: str = os.path.join(
             self.config.gmail_token_location, f"{slugify(email)}_token.json"
